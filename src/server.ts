@@ -28,7 +28,7 @@ function createServer(env: Env) {
       },
     },
     async (args) => {
-      const key = `conversations/${args.domain}.json`;
+      const key = `conversations/${args.domain}/${args.session_id}.json`;
       await env.R2.put(key, JSON.stringify(args));
 
       return {
