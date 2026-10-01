@@ -27,6 +27,12 @@
       "enabled": true
     }
   },
+  "d1_databases": [
+    {
+      "binding": "D1_CHAT",
+      "database_id": "a6b8ed18-b53f-4494-8e5a-443798cf6eb5"
+    }
+  ],
   "r2_buckets": [
     {
       "binding": "R2",
