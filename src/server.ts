@@ -4,6 +4,7 @@ import { z } from "zod";
 
 interface Env {
   R2: R2Bucket;
+  D1_CHAT: D1Database;
 }
 
 function createServer(env: Env) {
@@ -30,6 +31,10 @@ function createServer(env: Env) {
     async (args) => {
       const key = `conversations/${args.domain}/${args.session_id}.json`;
       await env.R2.put(key, JSON.stringify(args));
+
+      await env.D1_CHAT.prepare(
+        "INSERT INTO conversations (id, shop, r2_key) VALUES (?, ?, ?)"
+      ).bind(args.session_id, args.domain, key).run();
 
       return {
         content: [
