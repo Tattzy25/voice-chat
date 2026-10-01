@@ -1,57 +1,713 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
-
-interface Env {
-  R2: R2Bucket;
-  D1_CHAT: D1Database;
-}
-
-function createServer(env: Env) {
+// ==========================================
+// STOREFRONT CATALOG SCHEMAS
+// ==========================================
+const searchCatalogInputSchema = z.object({
+  shop_domain: z
+    .string()
+    .describe("The shop domain to call. This maps to https://{shop-domain}/api/ucp/mcp."),
+  meta: z
+    .object({
+      "ucp-agent": z.object({
+        profile: z
+          .string()
+          .url()
+          .describe("The URI to your agent's UCP profile for capability negotiation.")
+      })
+    })
+    .describe("Request metadata. You must include ucp-agent.profile."),
+  catalog: z
+    .object({
+      query: z
+        .string()
+        .describe("Free-text search query. For example, \"organic coffee beans\", \"winter jacket\".")
+        .optional(),
+      context: z
+        .object({
+          address_country: z.string().optional().describe("Localization hint for the buyer country."),
+          language: z.string().optional().describe("Localization hint for the buyer language."),
+          currency: z.string().optional().describe("Localization hint for the buyer currency."),
+          intent: z.string().optional().describe("The buyer's intent or shopping context.")
+        })
+        .describe("Buyer signals for relevance and localization (address_country, language, currency, and intent).")
+        .optional(),
+      filters: z
+        .object({
+          available: z
+            .boolean()
+            .describe("Filter by availability. Defaults to true (only sale-ready items). Set to false to include unavailable items.")
+        })
+        .describe("Availability filter. When true (default), only sale-ready items are returned. Set to false to include unavailable items.")
+        .optional(),
+      pagination: z
+        .object({
+          cursor: z
+            .string()
+            .describe("Opaque cursor from a previous response. Pass the returned pagination.cursor as catalog.pagination.cursor to request the next page.")
+            .optional(),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(250)
+            .describe("Page size. Integer, min 1, default 10, max 250.")
+            .optional()
+        })
+        .describe("Cursor-based pagination controls. The cursor carries only the next result offset, so the request's limit controls page size.")
+        .optional()
+    })
+    .describe("The catalog object containing the search parameters. All parameters are wrapped in a catalog object. Refer to the UCP catalog search spec for the complete schema.")
+});
+const getProductInputSchema = z.object({
+  shop_domain: z
+    .string()
+    .describe("The shop domain to call. This maps to https://{shop-domain}/api/ucp/mcp."),
+  meta: z
+    .object({
+      "ucp-agent": z.object({
+        profile: z
+          .string()
+          .url()
+          .describe("The URI to your agent's UCP profile for capability negotiation.")
+      })
+    })
+    .describe("Request metadata. You must include ucp-agent.profile."),
+  catalog: z
+    .object({
+      id: z
+        .string()
+        .describe("Product or variant identifier. For example, \"gid://shopify/Product/123\"."),
+      selected: z
+        .array(
+          z.object({
+            name: z.string().describe("The option name, e.g. \"Color\" or \"Size\"."),
+            label: z.string().describe("The option value label, e.g. \"Blue\" or \"10\".")
+          })
+        )
+        .describe("Option selections for variant narrowing. For example, [{\"name\": \"Color\", \"label\": \"Blue\"}]. The response reflects these selections in product.selected and filters the returned variants accordingly.")
+        .optional(),
+      context: z
+        .object({
+          address_country: z.string().optional().describe("Localization hint for the buyer country."),
+          language: z.string().optional().describe("Localization hint for the buyer language."),
+          currency: z.string().optional().describe("Localization hint for the buyer currency."),
+          intent: z.string().optional().describe("The buyer's intent or shopping context.")
+        })
+        .describe("Buyer context for localization (address_country, language, currency, and intent).")
+        .optional()
+    })
+    .describe("The catalog object containing the product lookup parameters. All parameters are wrapped in a catalog object. Refer to the UCP catalog lookup spec for the complete schema.")
+});
+// ==========================================
+// CART SCHEMAS
+// ==========================================
+const createCartInputSchema = z.object({
+  shop_domain: z
+    .string()
+    .describe("The shop domain to call. This maps to https://{shop-domain}/api/ucp/mcp."),
+  meta: z
+    .object({
+      "ucp-agent": z.object({
+        profile: z
+          .string()
+          .url()
+          .describe("The URI to your agent's UCP profile for capability negotiation.")
+      })
+    })
+    .describe("Request metadata. You must include ucp-agent.profile."),
+  cart: z
+    .object({
+      line_items: z
+        .array(
+          z.object({
+            quantity: z
+              .number()
+              .int()
+              .min(1)
+              .describe("The quantity to add for this line item."),
+            item: z.object({
+              id: z
+                .string()
+                .describe("The product variant id for this line item.")
+            })
+          })
+        )
+        .describe(
+          "Array of items to add to the cart. Each item must include quantity and an item object with the product variant id."
+        ),
+      context: z
+        .object({
+          address_country: z.string().optional().describe("Localization hint for the buyer country."),
+          address_region: z.string().optional().describe("Localization hint for the buyer region."),
+          postal_code: z.string().optional().describe("Localization hint for the buyer postal code.")
+        })
+        .describe(
+          "Localization hints including address_country, address_region, and postal_code. Merchants may use these as a signal for pricing, availability, and currency estimates, but context is not authoritative for shipping. If omitted, the merchant falls back to geo-IP."
+        )
+        .optional(),
+      attribution: z
+        .object({
+          referring_domain: z.string().optional(),
+          click_id_tag: z.string().optional(),
+          click_id_value: z.string().optional(),
+          activity_id_tag: z.string().optional(),
+          activity_id_value: z.string().optional(),
+          utm_campaign: z.string().optional(),
+          utm_source: z.string().optional(),
+          utm_medium: z.string().optional(),
+          utm_content: z.string().optional(),
+          utm_term: z.string().optional()
+        })
+        .describe(
+          "Optional attribution metadata. Supported fields include referring_domain, click_id_tag, click_id_value, activity_id_tag, activity_id_value, utm_campaign, utm_source, utm_medium, utm_content, and utm_term."
+        )
+        .optional(),
+      buyer: z
+        .object({})
+        .passthrough()
+        .describe("Optional buyer information for personalized estimates.")
+        .optional(),
+      signals: z
+        .object({})
+        .passthrough()
+        .describe("Optional platform-provided environment data for authorization and abuse prevention.")
+        .optional()
+    })
+    .describe("The cart object containing the cart data.")
+});
+const updateCartInputSchema = z.object({
+  shop_domain: z
+    .string()
+    .describe("The shop domain to call. This maps to https://{shop-domain}/api/ucp/mcp."),
+  meta: z
+    .object({
+      "ucp-agent": z.object({
+        profile: z
+          .string()
+          .url()
+          .describe("The URI to your agent's UCP profile for capability negotiation.")
+      })
+    })
+    .describe("Request metadata. You must include ucp-agent.profile."),
+  id: z.string().describe("The ID of the cart to update."),
+  cart: z
+    .object({
+      line_items: z
+        .array(
+          z.object({
+            quantity: z
+              .number()
+              .int()
+              .min(1)
+              .describe("The full replacement quantity for this line item."),
+            item: z.object({
+              id: z
+                .string()
+                .describe("The product variant id for this line item.")
+            })
+          })
+        )
+        .describe("Full replacement array of items."),
+      context: z
+        .object({
+          address_country: z.string().optional().describe("Localization signal for the buyer country."),
+          address_region: z.string().optional().describe("Localization signal for the buyer region."),
+          postal_code: z.string().optional().describe("Localization signal for the buyer postal code.")
+        })
+        .describe(
+          "Localization signals. Context is a hint for pricing, availability, and currency and is not used as the shipping address at checkout."
+        )
+        .optional(),
+      attribution: z
+        .object({
+          referring_domain: z.string().optional(),
+          click_id_tag: z.string().optional(),
+          click_id_value: z.string().optional(),
+          activity_id_tag: z.string().optional(),
+          activity_id_value: z.string().optional(),
+          utm_campaign: z.string().optional(),
+          utm_source: z.string().optional(),
+          utm_medium: z.string().optional(),
+          utm_content: z.string().optional(),
+          utm_term: z.string().optional()
+        })
+        .describe(
+          "Attribution metadata. Because the cart object is replaced, resend attribution if you want to preserve it."
+        )
+        .optional(),
+      buyer: z
+        .object({})
+        .passthrough()
+        .describe("Optional buyer information.")
+        .optional(),
+      signals: z
+        .object({})
+        .passthrough()
+        .describe("Optional platform signals.")
+        .optional()
+    })
+    .describe(
+      "The cart object containing the full desired cart state. Any field you omit is removed from the cart. update_cart uses PUT semantics and does not merge partial updates."
+    )
+});
+// ==========================================
+// CHECKOUT SCHEMAS
+// ==========================================
+const createCheckoutInputSchema = z.object({
+  shop_domain: z
+    .string()
+    .describe("The shop domain to call. This maps to https://{shop-domain}/api/ucp/mcp."),
+  meta: z
+    .object({
+      "ucp-agent": z.object({
+        profile: z
+          .string()
+          .url()
+          .describe("The URI to your agent's UCP profile for capability negotiation.")
+      })
+    })
+    .describe("Request metadata. You must include ucp-agent.profile."),
+  cart_id: z
+    .string()
+    .describe(
+      "The optional ID of a cart built with Cart MCP to convert into this checkout."
+    )
+    .optional(),
+  checkout: z
+    .object({
+      currency: z
+        .string()
+        .describe("ISO 4217 currency code, for example USD, EUR, or GBP.")
+        .optional(),
+      line_items: z
+        .array(
+          z.object({
+            quantity: z
+              .number()
+              .int()
+              .min(1)
+              .describe("The quantity to purchase for this line item."),
+            item: z.object({
+              id: z
+                .string()
+                .describe("The product variant id for this line item.")
+            })
+          })
+        )
+        .describe(
+          "Array of items to purchase. Each item must include quantity and an item object with the product variant id."
+        )
+        .optional(),
+      buyer: z
+        .object({})
+        .passthrough()
+        .describe(
+          "Buyer information. Contact method email or phone_number must be provided, per-merchant configuration."
+        )
+        .optional(),
+      context: z
+        .object({
+          address_country: z.string().optional().describe("Provisional buyer signal for country."),
+          address_region: z.string().optional().describe("Provisional buyer signal for region."),
+          postal_code: z.string().optional().describe("Provisional buyer signal for postal code."),
+          intent: z.string().optional().describe("Provisional buyer intent signal."),
+          language: z.string().optional().describe("Provisional buyer language signal."),
+          currency: z.string().optional().describe("Provisional buyer currency signal."),
+          eligibility: z.array(z.string()).optional().describe("Eligibility signals.")
+        })
+        .describe(
+          "Provisional buyer signals for intent, localization, currency, and eligibility decisions. A shipping address supersedes these context hints."
+        )
+        .optional(),
+      attribution: z
+        .object({
+          referring_domain: z.string().optional(),
+          click_id_tag: z.string().optional(),
+          click_id_value: z.string().optional(),
+          activity_id_tag: z.string().optional(),
+          activity_id_value: z.string().optional(),
+          utm_campaign: z.string().optional(),
+          utm_source: z.string().optional(),
+          utm_medium: z.string().optional(),
+          utm_content: z.string().optional(),
+          utm_term: z.string().optional()
+        })
+        .describe(
+          "Optional attribution metadata. Supported fields include referring_domain, click_id_tag, click_id_value, activity_id_tag, activity_id_value, utm_campaign, utm_source, utm_medium, utm_content, and utm_term."
+        )
+        .optional(),
+      fulfillment: z
+        .object({})
+        .passthrough()
+        .describe("Fulfillment preferences including shipping methods and destinations.")
+        .optional(),
+      payment: z
+        .object({})
+        .passthrough()
+        .describe("Payment configuration including available instruments and selected_instrument_id.")
+        .optional()
+    })
+    .describe(
+      "The checkout object containing all checkout data. Optional when cart_id is provided, in which case the cart's contents are used instead."
+    )
+    .optional()
+}).superRefine((value, ctx) => {
+  if (value.cart_id) {
+    return;
+  }
+  if (!value.checkout) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "checkout is required when cart_id is not provided.",
+      path: ["checkout"]
+    });
+    return;
+  }
+  if (!value.checkout.currency) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "checkout.currency is required when cart_id is not provided.",
+      path: ["checkout", "currency"]
+    });
+  }
+  if (!value.checkout.line_items) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "checkout.line_items is required when cart_id is not provided.",
+      path: ["checkout", "line_items"]
+    });
+  }
+  if (!value.checkout.buyer) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "checkout.buyer is required when cart_id is not provided.",
+      path: ["checkout", "buyer"]
+    });
+  }
+});
+const updateCheckoutInputSchema = z.object({
+  shop_domain: z
+    .string()
+    .describe("The shop domain to call. This maps to https://{shop-domain}/api/ucp/mcp."),
+  meta: z
+    .object({
+      "ucp-agent": z.object({
+        profile: z
+          .string()
+          .url()
+          .describe("The URI to your agent's UCP profile for capability negotiation.")
+      })
+    })
+    .describe("Request metadata. You must include ucp-agent.profile."),
+  id: z.string().describe("The ID of the checkout session to update."),
+  checkout: z
+    .object({
+      line_items: z
+        .array(
+          z.object({
+            id: z
+              .string()
+              .describe("The existing checkout line item id.")
+              .optional(),
+            quantity: z
+              .number()
+              .int()
+              .min(1)
+              .describe("The updated quantity for this line item."),
+            item: z.object({
+              id: z
+                .string()
+                .describe("The product variant id for this line item.")
+            })
+          })
+        )
+        .describe("Updated array of items. Replaces existing line items."),
+      buyer: z
+        .object({})
+        .passthrough()
+        .describe(
+          "Updated buyer information. Contact method email or phone_number must be provided, per-merchant configuration."
+        ),
+      context: z
+        .object({
+          address_country: z.string().optional().describe("Updated provisional buyer signal for country."),
+          address_region: z.string().optional().describe("Updated provisional buyer signal for region."),
+          postal_code: z.string().optional().describe("Updated provisional buyer signal for postal code."),
+          intent: z.string().optional().describe("Updated provisional buyer intent signal."),
+          language: z.string().optional().describe("Updated provisional buyer language signal."),
+          currency: z.string().optional().describe("Updated provisional buyer currency signal."),
+          eligibility: z.array(z.string()).optional().describe("Updated eligibility signals.")
+        })
+        .describe(
+          "Updated provisional buyer signals for intent, localization, currency, and eligibility decisions. A shipping address supersedes these context hints."
+        )
+        .optional(),
+      attribution: z
+        .object({
+          referring_domain: z.string().optional(),
+          click_id_tag: z.string().optional(),
+          click_id_value: z.string().optional(),
+          activity_id_tag: z.string().optional(),
+          activity_id_value: z.string().optional(),
+          utm_campaign: z.string().optional(),
+          utm_source: z.string().optional(),
+          utm_medium: z.string().optional(),
+          utm_content: z.string().optional(),
+          utm_term: z.string().optional()
+        })
+        .describe(
+          "Attribution metadata. Because the checkout object is replaced, resend attribution if you want to preserve it."
+        )
+        .optional(),
+      fulfillment: z
+        .object({})
+        .passthrough()
+        .describe(
+          "Updated fulfillment preferences. Each method must include line_item_ids."
+        )
+        .optional(),
+      payment: z
+        .object({})
+        .passthrough()
+        .describe(
+          "Updated payment configuration. Do not send response-only display fields from payment.instruments."
+        )
+        .optional()
+    })
+    .describe(
+      "The checkout object containing the complete updated checkout state. update_checkout uses PUT semantics. Omit a field and it is removed from the checkout. There is no server-side merge of partial updates."
+    )
+});
+// ==========================================
+// FAQ & POLICIES SCHEMAS
+// ==========================================
+const searchShopPoliciesAndFaqsInputSchema = z.object({
+  store_domain: z
+    .string()
+    .describe("The store domain to call. This maps to https://{storedomain}/api/mcp."),
+  query: z
+    .string()
+    .describe(
+      "The question about policies or FAQs. For example, 'What is your return policy for sale items?'"
+    ),
+  context: z
+    .string()
+    .describe(
+      "Additional context like the current product being viewed or the customer's situation."
+    )
+    .optional()
+});
+// ==========================================
+// SERVER CREATION
+// ==========================================
+function createServer() {
   const server = new McpServer({
-    name: "nonya",
-    version: "1.0.0",
+    name: "Master Group MCP",
+    version: "1.0.0"
   });
-
+  // --- Storefront Catalog Tools ---
   server.registerTool(
-    "r2-chat",
+    "search_catalog",
     {
-      description: "Add conversations to the R2 bucket",
-      inputSchema: {
-        session_id: z.string(),
-        domain: z.string().optional(),
-        customer_id: z.string().optional(),
-        audio_url: z.string().optional(),
-        duration_seconds: z.number().optional(),
-        assistant: z.string().optional(),
-        user: z.string().optional(),
-        timestamp: z.string().optional(),
-      },
+      description: "Searches the store's product catalog. The response conforms to the UCP catalog search response, including a UCP metadata envelope; products with title, description, price range (minor units), media, and variants; and cursor-based pagination. When to use: A customer asks \"Do you have any organic coffee?\", You need to find products matching specific criteria, or A customer wants to browse items in a category.",
+      inputSchema: searchCatalogInputSchema
     },
-    async (args) => {
-      const key = `conversations/${args.domain}/${args.session_id}.json`;
-      await env.R2.put(key, JSON.stringify(args));
-
-      await env.D1_CHAT.prepare(
-        "INSERT INTO conversations (id, shop, r2_key) VALUES (?, ?, ?)"
-      ).bind(args.session_id, args.domain, key).run();
-
+    async ({ shop_domain, meta, catalog }: z.infer<typeof searchCatalogInputSchema>) => {
+      const response = await fetch(`https://${shop_domain}/api/ucp/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          id: 2,
+          params: { name: "search_catalog", arguments: { meta, catalog } }
+        })
+      });
+      const result = await response.json() as Record<string, unknown>;
+      return { content: [{ text: JSON.stringify(result), type: "text" }], structuredContent: result };
+    }
+  );
+  server.registerTool(
+    "get_product",
+    {
+      description: "Retrieves full details for a single product with optional variant selection. The response conforms to the UCP catalog get_product response, including product.selected reflecting effective option selections, option values with available and exists signals, and variants matching the selection. Use this when a customer has selected a product and needs full details, you need to show variant options with availability signals, or a customer is making option selections (Color, Size, and so on).",
+      inputSchema: getProductInputSchema
+    },
+    async ({ shop_domain, meta, catalog }: z.infer<typeof getProductInputSchema>) => {
+      const response = await fetch(`https://${shop_domain}/api/ucp/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          id: 4,
+          params: { name: "get_product", arguments: { meta, catalog } }
+        })
+      });
+      const result = await response.json() as Record<string, unknown>;
+      return { content: [{ text: JSON.stringify(result), type: "text" }], structuredContent: result };
+    }
+  );
+  // --- Cart Tools ---
+  server.registerTool(
+    "create_cart",
+    {
+      description: "Create a new cart with line items and optional buyer context. Use this when the buyer asks to place selected catalog products into a cart. The response includes the merchant-assigned cart ID, validated line items, estimated totals, and a 'continue_url' for continuing on the merchant's storefront.",
+      inputSchema: createCartInputSchema
+    },
+    async ({ shop_domain, meta, cart }: z.infer<typeof createCartInputSchema>) => {
+      const response = await fetch(`https://${shop_domain}/api/ucp/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          id: 1,
+          params: { name: "create_cart", arguments: { meta, cart } }
+        })
+      });
+      const result = await response.json() as Record<string, unknown>;
+      if ("error" in result) {
+        return { content: [{ text: JSON.stringify(result), type: "text" }], structuredContent: result, isError: true };
+      }
+      return { content: [{ text: JSON.stringify(result), type: "text" }], structuredContent: result };
+    }
+  );
+  server.registerTool(
+    "update_cart",
+    {
+      description: "Replace the contents of an existing cart. This tool uses PUT semantics: every request replaces the cart's full state with the supplied payload. Omitted fields, including 'line_items' or 'context', are removed. There is no server-side merge of partial updates. Preserve all existing state that the user has not asked to change.",
+      inputSchema: updateCartInputSchema
+    },
+    async ({ shop_domain, meta, id, cart }: z.infer<typeof updateCartInputSchema>) => {
+      const response = await fetch(`https://${shop_domain}/api/ucp/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          id: 2,
+          params: { name: "update_cart", arguments: { meta, id, cart } }
+        })
+      });
+      const result = await response.json() as Record<string, unknown>;
+      if ("error" in result) {
+        return { content: [{ text: JSON.stringify(result), type: "text" }], structuredContent: result, isError: true };
+      }
+      return { content: [{ text: JSON.stringify(result), type: "text" }], structuredContent: result };
+    }
+  );
+  // --- Checkout Tools ---
+  server.registerTool(
+    "create_checkout",
+    {
+      description: "Create a new checkout session with line items, buyer information, and fulfillment preferences. Use this tool when a buyer is ready to purchase items and you need to initiate the checkout process. The response includes a `continue_url` for handing off to a trusted UI. When to use: Buyer says \"I want to buy this item\", or Agent has collected enough information to start checkout, and Buyer confirms their cart and wants to proceed.",
+      inputSchema: createCheckoutInputSchema
+    },
+    async ({ shop_domain, meta, cart_id, checkout }: z.infer<typeof createCheckoutInputSchema>) => {
+      const response = await fetch(`https://${shop_domain}/api/ucp/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          id: 1,
+          params: {
+            name: "create_checkout",
+            arguments: { meta, ...(cart_id ? { cart_id } : {}), ...(checkout ? { checkout } : {}) }
+          }
+        })
+      });
+      const result = await response.json() as Record<string, unknown>;
+      if ("error" in result) {
+        return { content: [{ text: JSON.stringify(result), type: "text" }], structuredContent: result, isError: true };
+      }
+      return { content: [{ text: JSON.stringify(result), type: "text" }], structuredContent: result };
+    }
+  );
+  server.registerTool(
+    "update_checkout",
+    {
+      description: "Update an existing checkout session with new information. Use this tool to modify line items, update shipping address, change fulfillment method, or add buyer information before completing the checkout. When to use: Buyer wants to change quantity or remove items, Buyer provides or updates shipping address, Need to update buyer email or contact info, or Changing a delivery option. Caution: `update_checkout` uses PUT semantics. Each request replaces the full checkout state with the payload you send. Omit a field (for example `line_items` or `buyer`) and it is removed from the checkout. There is no server-side merge of partial updates. Before sending an update, remove response-only fields from the payload. `checkout.buyer.country_code` isn't accepted as input. `checkout.payment.instruments[].display` is response-only. For fulfillment updates, `checkout.fulfillment.methods[].id` is optional, but `line_item_ids` is required.",
+      inputSchema: updateCheckoutInputSchema
+    },
+    async ({ shop_domain, meta, id, checkout }: z.infer<typeof updateCheckoutInputSchema>) => {
+      const response = await fetch(`https://${shop_domain}/api/ucp/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          id: 1,
+          params: { name: "update_checkout", arguments: { meta, id, checkout } }
+        })
+      });
+      const result = await response.json() as Record<string, unknown>;
+      if ("error" in result) {
+        return { content: [{ text: JSON.stringify(result), type: "text" }], structuredContent: result, isError: true };
+      }
+      return { content: [{ text: JSON.stringify(result), type: "text" }], structuredContent: result };
+    }
+  );
+  // --- FAQ & Policies Tools ---
+  server.registerTool(
+    "search_shop_policies_and_faqs",
+    {
+      description: "Answers questions about the store's policies, products, and services to build customer trust. When to use: A customer asks \"What's your return policy?\", You need to clarify shipping or payment options, or A customer has questions about product care or warranties. Use natural language to query the search or the search will fail.",
+      inputSchema: searchShopPoliciesAndFaqsInputSchema
+    },
+    async ({ store_domain, query, context }: z.infer<typeof searchShopPoliciesAndFaqsInputSchema>) => {
+      const response = await fetch(`https://${store_domain}/api/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          id: 1,
+          params: {
+            name: "search_shop_policies_and_faqs",
+            arguments: {
+              query,
+              ...(context ? { context } : {})
+            }
+          }
+        })
+      });
+      const result = await response.json() as Record<string, unknown>;
+      if ("error" in result) {
+        return {
+          content: [
+            {
+              text: JSON.stringify(result),
+              type: "text"
+            }
+          ],
+          structuredContent: result,
+          isError: true
+        };
+      }
       return {
         content: [
           {
-            type: "text",
-            text: `Conversation ${args.session_id} saved to R2 at ${key}`,
-          },
+            text: JSON.stringify(result),
+            type: "text"
+          }
         ],
+        structuredContent: result
       };
     }
   );
-
   return server;
 }
-
 export default {
-  fetch(request, env: Env, ctx) {
-    return createMcpHandler(() => createServer(env))(request, env, ctx);
+  fetch(request, env, ctx) {
+    return createMcpHandler(createServer, {
+      allowedHostnames: ["master-group-mcp.anigok.com"],
+      allowedOriginHostnames: "*",
+    })(request, env, ctx);
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler;
